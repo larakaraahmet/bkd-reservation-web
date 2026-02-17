@@ -84,9 +84,10 @@ def parse_range(text):
 
 
 def get_reservations():
+    # ✅ id de dönüyor (silme için lazım)
     with db_conn() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute('SELECT team, "table", slot_index FROM reservations ORDER BY slot_index;')
+            cur.execute('SELECT id, team, "table", slot_index FROM reservations ORDER BY slot_index;')
             return cur.fetchall()
 
 
@@ -131,6 +132,7 @@ def home():
     td, th {{ border: 1px solid #aaa; padding: 6px; text-align:center; }}
     .free {{ background:#d9ffd9; }}
     .taken {{ background:#ffb3b3; }}
+    .taken:hover {{ filter: brightness(0.96); }}
 
     .controls {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px; }}
 
@@ -256,19 +258,22 @@ async function load() {{
   head += "</tr>";
   grid.innerHTML += head;
 
+  // ✅ artık team yerine {team,id} tutuyoruz
   const taken = new Map();
   data.reservations.forEach(r => {{
-    taken.set(r.slot_index + "-" + r.table, r.team);
+    taken.set(r.slot_index + "-" + r.table, {{ team: r.team, id: r.id }});
   }});
 
   data.slots.forEach((s,i) => {{
     let row = "<tr><td>"+s[0]+"-"+s[1]+"</td>";
     tables.forEach(t => {{
       let key = i + "-" + t;
-      if (taken.has(key))
-        row += "<td class='taken'>Takım "+taken.get(key)+"</td>";
-      else
+      if (taken.has(key)) {{
+        const info = taken.get(key);
+        row += "<td class='taken' style='cursor:pointer' onclick='delRes("+info.id+")'>Takım "+info.team+"</td>";
+      }} else {{
         row += "<td class='free'></td>";
+      }}
     }});
     row += "</tr>";
     grid.innerHTML += row;
@@ -316,6 +321,30 @@ async function resetTable() {{
     alert("❌ Şifre yanlış / yetkisiz!");
   }} else {{
     alert("✅ Tüm rezervasyonlar silindi!");
+    load();
+  }}
+}}
+
+// ✅ DOLU HÜCREYE TIKLAYINCA TEKİL REZERVASYON SİLME
+async function delRes(id) {{
+  const token = prompt("Admin şifresi:");
+  if (!token) return;
+
+  const ok = confirm("Bu rezervasyonu silmek istiyor musun?");
+  if (!ok) return;
+
+  const res = await fetch('/api/delete', {{
+    method: 'POST',
+    headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{ token, id }})
+  }});
+
+  const data = await res.json();
+
+  if (!data.ok) {{
+    alert("❌ " + (data.error || "Silinemedi"));
+  }} else {{
+    document.getElementById("msg").innerText = "🗑️ Rezervasyon silindi.";
     load();
   }}
 }}
@@ -389,6 +418,33 @@ def reset():
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE reservations;")
         conn.commit()
+
+    return jsonify({"ok": True})
+
+
+# ✅ YENİ: TEKİL REZERVASYON SİLME
+@app.post("/api/delete")
+def delete_reservation():
+    data = request.json or {}
+    token = data.get("token", "")
+    rid = data.get("id")
+
+    if token != ADMIN_TOKEN:
+        return jsonify({"ok": False, "error": "Yetkisiz"}), 401
+
+    try:
+        rid = int(rid)
+    except Exception:
+        return jsonify({"ok": False, "error": "Geçersiz id"}), 400
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM reservations WHERE id = %s;", (rid,))
+            deleted = cur.rowcount
+        conn.commit()
+
+    if deleted == 0:
+        return jsonify({"ok": False, "error": "Rezervasyon bulunamadı"}), 404
 
     return jsonify({"ok": True})
 
