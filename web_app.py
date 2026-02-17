@@ -51,9 +51,12 @@ def init_db():
             """)
         conn.commit()
 
-@app.before_first_request
+@app.before_request
 def startup():
-    init_db()
+    if not hasattr(app, "_db_inited"):
+        init_db()
+        app._db_inited = True
+
 
 def parse_range(text):
     text = (text or "").strip()
