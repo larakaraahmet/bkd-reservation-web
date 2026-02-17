@@ -109,24 +109,80 @@ table {{ border-collapse: collapse; }}
 td, th {{ border: 1px solid #aaa; padding: 6px; text-align:center; }}
 .free {{ background:#d9ffd9; }}
 .taken {{ background:#ffb3b3; }}
+
+#modal {{
+    position: fixed;
+    top:0; left:0;
+    width:100%; height:100%;
+    background:rgba(0,0,0,0.6);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+}}
+
+#modalBox {{
+    background:white;
+    padding:20px;
+    border-radius:8px;
+}}
 </style>
 </head>
 <body>
+
+<div id="modal" style="display:none;">
+  <div id="modalBox">
+    <h3>Kaç masa var?</h3>
+    <input id="masaInput" type="number" min="1">
+    <button onclick="saveMasa()">Kaydet</button>
+  </div>
+</div>
+
 <h2>Robot Reservation</h2>
 
 Takım: <input id="team" type="number">
 Aralık: <input id="range" placeholder="11:20-12:10">
 Masa:
-<select id="table">
-<option>Auto</option>
-{''.join([f'<option>{t}</option>' for t in tables])}
-</select>
+<select id="table"></select>
+
 <button onclick="reserve()">Rezervasyon Al</button>
 
 <p id="msg"></p>
 <table id="grid"></table>
 
 <script>
+
+let tables = [];
+
+function initTables() {{
+    let saved = localStorage.getItem("masa_sayisi");
+
+    if(!saved) {{
+        document.getElementById("modal").style.display="flex";
+        return;
+    }}
+
+    buildTables(parseInt(saved));
+}}
+
+function saveMasa() {{
+    const n = parseInt(document.getElementById("masaInput").value);
+    if(!n || n<1) return;
+    localStorage.setItem("masa_sayisi", n);
+    document.getElementById("modal").style.display="none";
+    buildTables(n);
+}}
+
+function buildTables(n) {{
+    tables = [];
+    const select = document.getElementById("table");
+    select.innerHTML = "<option>Auto</option>";
+    for(let i=1;i<=n;i++) {{
+        tables.push(String(i));
+        select.innerHTML += "<option>"+i+"</option>";
+    }}
+    load();
+}}
+
 async function load() {{
     const res = await fetch('/api/state');
     const data = await res.json();
@@ -135,7 +191,7 @@ async function load() {{
     grid.innerHTML = "";
 
     let head = "<tr><th>Saat</th>";
-    data.tables.forEach(t => head += "<th>Masa "+t+"</th>");
+    tables.forEach(t => head += "<th>Masa "+t+"</th>");
     head += "</tr>";
     grid.innerHTML += head;
 
@@ -146,7 +202,7 @@ async function load() {{
 
     data.slots.forEach((s,i) => {{
         let row = "<tr><td>"+s[0]+"-"+s[1]+"</td>";
-        data.tables.forEach(t => {{
+        tables.forEach(t => {{
             let key = i+"-"+t;
             if(taken.has(key))
                 row += "<td class='taken'>Takım "+taken.get(key)+"</td>";
@@ -180,11 +236,13 @@ async function reserve() {{
     load();
 }}
 
-load();
+initTables();
+
 </script>
 </body>
 </html>
 """
+
 
 @app.get("/api/state")
 def state():
