@@ -12,7 +12,7 @@ END = "17:00"
 STEP_MIN = 10
 
 # ---- ENV AYARLARI ----
-TABLE_COUNT_DEFAULT = int(os.getenv("TABLE_COUNT", "5"))  # popup var, bu sadece default
+TABLE_COUNT_DEFAULT = int(os.getenv("TABLE_COUNT", "5"))  # web açılışında popup var, bu sadece default
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "secret")
 
 
@@ -45,8 +45,7 @@ def db_conn():
 def init_db():
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS reservations (
                     id SERIAL PRIMARY KEY,
                     team INTEGER NOT NULL,
@@ -55,8 +54,7 @@ def init_db():
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     UNIQUE ("table", slot_index)
                 );
-                """
-            )
+            """)
         conn.commit()
 
 
@@ -84,10 +82,9 @@ def parse_range(text):
 
 
 def get_reservations():
-    # ✅ id de dönüyor (silme için lazım)
     with db_conn() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute('SELECT id, team, "table", slot_index FROM reservations ORDER BY slot_index;')
+            cur.execute('SELECT team, "table", slot_index FROM reservations ORDER BY slot_index;')
             return cur.fetchall()
 
 
@@ -121,54 +118,61 @@ def find_slot(res, team, pref_range, pref_table, table_count: int):
 # ---- UI ----
 @app.get("/")
 def home():
+    # HTML içinde default table count kullanıyoruz, kullanıcı popup ile değiştirecek
     return f"""
 <html>
 <head>
-  <title>Robot Reservation</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body {{ font-family: Arial; margin: 20px; }}
-    table {{ border-collapse: collapse; width: 100%; max-width: 1100px; }}
-    td, th {{ border: 1px solid #aaa; padding: 6px; text-align:center; }}
-    .free {{ background:#d9ffd9; }}
-    .taken {{ background:#ffb3b3; }}
-    .taken:hover {{ filter: brightness(0.96); }}
+<title>Robot Reservation</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+body {{ font-family: Arial; margin: 20px; }}
+table {{ border-collapse: collapse; width: 100%; max-width: 1100px; }}
+td, th {{ border: 1px solid #aaa; padding: 6px; text-align:center; }}
+.free {{ background:#d9ffd9; }}
+.taken {{ background:#ffb3b3; }}
 
-    .controls {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px; }}
+.controls {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px; }}
 
-    button {{
-      padding: 8px 12px;
-      border: 0;
-      border-radius: 6px;
-      cursor: pointer;
-    }}
+button {{
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}}
 
-    #resetBtn {{ background: #d11; color: white; }}
-    #reserveBtn {{ background: #0b6; color: white; }}
+#resetBtn {{
+  background: #d11;
+  color: white;
+}}
 
-    #modal {{
-      position: fixed;
-      top:0; left:0;
-      width:100%; height:100%;
-      background:rgba(0,0,0,0.6);
-      display:none;
-      align-items:center;
-      justify-content:center;
-      z-index: 9999;
-    }}
+#reserveBtn {{
+  background: #0b6;
+  color: white;
+}}
 
-    #modalBox {{
-      background:white;
-      padding:20px;
-      border-radius:10px;
-      width: min(420px, 92vw);
-    }}
+#modal {{
+  position: fixed;
+  top:0; left:0;
+  width:100%; height:100%;
+  background:rgba(0,0,0,0.6);
+  display:none;
+  align-items:center;
+  justify-content:center;
+  z-index: 9999;
+}}
 
-    #msg {{
-      margin: 8px 0 14px 0;
-      font-weight: 600;
-    }}
-  </style>
+#modalBox {{
+  background:white;
+  padding:20px;
+  border-radius:10px;
+  width: min(420px, 92vw);
+}}
+
+#msg {{
+  margin: 8px 0 14px 0;
+  font-weight: 600;
+}}
+</style>
 </head>
 <body>
 
@@ -258,22 +262,19 @@ async function load() {{
   head += "</tr>";
   grid.innerHTML += head;
 
-  // ✅ artık team yerine {team,id} tutuyoruz
   const taken = new Map();
   data.reservations.forEach(r => {{
-    taken.set(r.slot_index + "-" + r.table, {{ team: r.team, id: r.id }});
+    taken.set(r.slot_index + "-" + r.table, r.team);
   }});
 
   data.slots.forEach((s,i) => {{
     let row = "<tr><td>"+s[0]+"-"+s[1]+"</td>";
     tables.forEach(t => {{
       let key = i + "-" + t;
-      if (taken.has(key)) {{
-        const info = taken.get(key);
-        row += "<td class='taken' style='cursor:pointer' onclick='delRes("+info.id+")'>Takım "+info.team+"</td>";
-      }} else {{
+      if (taken.has(key))
+        row += "<td class='taken'>Takım "+taken.get(key)+"</td>";
+      else
         row += "<td class='free'></td>";
-      }}
     }});
     row += "</tr>";
     grid.innerHTML += row;
@@ -325,30 +326,6 @@ async function resetTable() {{
   }}
 }}
 
-// ✅ DOLU HÜCREYE TIKLAYINCA TEKİL REZERVASYON SİLME
-async function delRes(id) {{
-  const token = prompt("Admin şifresi:");
-  if (!token) return;
-
-  const ok = confirm("Bu rezervasyonu silmek istiyor musun?");
-  if (!ok) return;
-
-  const res = await fetch('/api/delete', {{
-    method: 'POST',
-    headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{ token, id }})
-  }});
-
-  const data = await res.json();
-
-  if (!data.ok) {{
-    alert("❌ " + (data.error || "Silinemedi"));
-  }} else {{
-    document.getElementById("msg").innerText = "🗑️ Rezervasyon silindi.";
-    load();
-  }}
-}}
-
 buildTables(tableCount);
 initTables();
 </script>
@@ -383,7 +360,7 @@ def reserve():
         table_count = int(table_count)
         if table_count < 1 or table_count > 60:
             return jsonify({"ok": False, "error": "Masa sayısı geçersiz"})
-    except Exception:
+    except:
         return jsonify({"ok": False, "error": "Masa sayısı geçersiz"})
 
     res = get_reservations()
@@ -418,33 +395,6 @@ def reset():
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE reservations;")
         conn.commit()
-
-    return jsonify({"ok": True})
-
-
-# ✅ YENİ: TEKİL REZERVASYON SİLME
-@app.post("/api/delete")
-def delete_reservation():
-    data = request.json or {}
-    token = data.get("token", "")
-    rid = data.get("id")
-
-    if token != ADMIN_TOKEN:
-        return jsonify({"ok": False, "error": "Yetkisiz"}), 401
-
-    try:
-        rid = int(rid)
-    except Exception:
-        return jsonify({"ok": False, "error": "Geçersiz id"}), 400
-
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM reservations WHERE id = %s;", (rid,))
-            deleted = cur.rowcount
-        conn.commit()
-
-    if deleted == 0:
-        return jsonify({"ok": False, "error": "Rezervasyon bulunamadı"}), 404
 
     return jsonify({"ok": True})
 
