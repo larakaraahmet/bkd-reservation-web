@@ -12,7 +12,7 @@ END = "17:00"
 STEP_MIN = 10
 
 # ---- ENV AYARLARI ----
-TABLE_COUNT_DEFAULT = int(os.getenv("TABLE_COUNT", "5"))  # web açılışında popup var, bu sadece default
+TABLE_COUNT_DEFAULT = int(os.getenv("TABLE_COUNT", "5"))  # popup var, bu sadece default
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "secret")
 
 
@@ -45,7 +45,8 @@ def db_conn():
 def init_db():
     with db_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS reservations (
                     id SERIAL PRIMARY KEY,
                     team INTEGER NOT NULL,
@@ -54,7 +55,8 @@ def init_db():
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     UNIQUE ("table", slot_index)
                 );
-            """)
+                """
+            )
         conn.commit()
 
 
@@ -121,57 +123,50 @@ def home():
     return f"""
 <html>
 <head>
-<title>Robot Reservation</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-body {{ font-family: Arial; margin: 20px; }}
-table {{ border-collapse: collapse; width: 100%; max-width: 1100px; }}
-td, th {{ border: 1px solid #aaa; padding: 6px; text-align:center; }}
-.free {{ background:#d9ffd9; }}
-.taken {{ background:#ffb3b3; }}
+  <title>Robot Reservation</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {{ font-family: Arial; margin: 20px; }}
+    table {{ border-collapse: collapse; width: 100%; max-width: 1100px; }}
+    td, th {{ border: 1px solid #aaa; padding: 6px; text-align:center; }}
+    .free {{ background:#d9ffd9; }}
+    .taken {{ background:#ffb3b3; }}
 
-.controls {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px; }}
+    .controls {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px; }}
 
-button {{
-  padding: 8px 12px;
-  border: 0;
-  border-radius: 6px;
-  cursor: pointer;
-}}
+    button {{
+      padding: 8px 12px;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+    }}
 
-#resetBtn {{
-  background: #d11;
-  color: white;
-}}
+    #resetBtn {{ background: #d11; color: white; }}
+    #reserveBtn {{ background: #0b6; color: white; }}
 
-#reserveBtn {{
-  background: #0b6;
-  color: white;
-}}
+    #modal {{
+      position: fixed;
+      top:0; left:0;
+      width:100%; height:100%;
+      background:rgba(0,0,0,0.6);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      z-index: 9999;
+    }}
 
-#modal {{
-  position: fixed;
-  top:0; left:0;
-  width:100%; height:100%;
-  background:rgba(0,0,0,0.6);
-  display:none;
-  align-items:center;
-  justify-content:center;
-  z-index: 9999;
-}}
+    #modalBox {{
+      background:white;
+      padding:20px;
+      border-radius:10px;
+      width: min(420px, 92vw);
+    }}
 
-#modalBox {{
-  background:white;
-  padding:20px;
-  border-radius:10px;
-  width: min(420px, 92vw);
-}}
-
-#msg {{
-  margin: 8px 0 14px 0;
-  font-weight: 600;
-}}
-</style>
+    #msg {{
+      margin: 8px 0 14px 0;
+      font-weight: 600;
+    }}
+  </style>
 </head>
 <body>
 
@@ -207,9 +202,6 @@ button {{
 </div>
 
 <p id="msg"></p>
-<p style="margin-top:0;color:#444;">
-  İpucu: Dolu (kırmızı) hücreye tıklarsan o randevuyu silebilirsin (admin şifresi ister).
-</p>
 <table id="grid"></table>
 
 <script>
@@ -273,15 +265,10 @@ async function load() {{
     let row = "<tr><td>"+s[0]+"-"+s[1]+"</td>";
     tables.forEach(t => {{
       let key = i + "-" + t;
-
-      if (taken.has(key)) {{
-        const team = taken.get(key);
-        row += "<td class='taken' style='cursor:pointer' " +
-               "onclick='deleteCell("+i+", \""+t+"\", "+team+")'>" +
-               "Takım "+team+"</td>";
-      }} else {{
+      if (taken.has(key))
+        row += "<td class='taken'>Takım "+taken.get(key)+"</td>";
+      else
         row += "<td class='free'></td>";
-      }}
     }});
     row += "</tr>";
     grid.innerHTML += row;
@@ -333,28 +320,6 @@ async function resetTable() {{
   }}
 }}
 
-async function deleteCell(slotIndex, table, team) {{
-  const ok = confirm("Silinsin mi?\\nTakım " + team + " / Masa " + table);
-  if (!ok) return;
-
-  const token = prompt("Admin şifresi:");
-  if (!token) return;
-
-  const res = await fetch('/api/delete', {{
-    method:'POST',
-    headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{ token, slot_index: slotIndex, table }})
-  }});
-
-  const data = await res.json();
-
-  if (!data.ok) {{
-    alert("❌ " + (data.error || "Silinemedi"));
-  }} else {{
-    load();
-  }}
-}}
-
 buildTables(tableCount);
 initTables();
 </script>
@@ -389,7 +354,7 @@ def reserve():
         table_count = int(table_count)
         if table_count < 1 or table_count > 60:
             return jsonify({"ok": False, "error": "Masa sayısı geçersiz"})
-    except:
+    except Exception:
         return jsonify({"ok": False, "error": "Masa sayısı geçersiz"})
 
     res = get_reservations()
@@ -424,36 +389,6 @@ def reset():
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE reservations;")
         conn.commit()
-
-    return jsonify({"ok": True})
-
-
-@app.post("/api/delete")
-def delete_one():
-    data = request.json or {}
-    token = data.get("token", "")
-    table = str(data.get("table", "")).strip()
-    slot_index = data.get("slot_index")
-
-    if token != ADMIN_TOKEN:
-        return jsonify({"ok": False, "error": "Yetkisiz"}), 401
-
-    try:
-        slot_index = int(slot_index)
-    except:
-        return jsonify({"ok": False, "error": "slot_index geçersiz"}), 400
-
-    if not table:
-        return jsonify({"ok": False, "error": "masa boş"}), 400
-
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute('DELETE FROM reservations WHERE "table"=%s AND slot_index=%s;', (table, slot_index))
-            deleted = cur.rowcount
-        conn.commit()
-
-    if deleted == 0:
-        return jsonify({"ok": False, "error": "Kayıt bulunamadı"}), 404
 
     return jsonify({"ok": True})
 
