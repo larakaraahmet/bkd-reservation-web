@@ -118,7 +118,6 @@ def find_slot(res, team, pref_range, pref_table, table_count: int):
 # ---- UI ----
 @app.get("/")
 def home():
-    # HTML içinde default table count kullanıyoruz, kullanıcı popup ile değiştirecek
     return f"""
 <html>
 <head>
@@ -208,6 +207,9 @@ button {{
 </div>
 
 <p id="msg"></p>
+<p style="margin-top:0;color:#444;">
+  İpucu: Dolu (kırmızı) hücreye tıklarsan o randevuyu silebilirsin (admin şifresi ister).
+</p>
 <table id="grid"></table>
 
 <script>
@@ -271,10 +273,15 @@ async function load() {{
     let row = "<tr><td>"+s[0]+"-"+s[1]+"</td>";
     tables.forEach(t => {{
       let key = i + "-" + t;
-      if (taken.has(key))
-        row += "<td class='taken'>Takım "+taken.get(key)+"</td>";
-      else
+
+      if (taken.has(key)) {{
+        const team = taken.get(key);
+        row += "<td class='taken' style='cursor:pointer' " +
+               "onclick='deleteCell("+i+", \""+t+"\", "+team+")'>" +
+               "Takım "+team+"</td>";
+      }} else {{
         row += "<td class='free'></td>";
+      }}
     }});
     row += "</tr>";
     grid.innerHTML += row;
@@ -322,6 +329,28 @@ async function resetTable() {{
     alert("❌ Şifre yanlış / yetkisiz!");
   }} else {{
     alert("✅ Tüm rezervasyonlar silindi!");
+    load();
+  }}
+}}
+
+async function deleteCell(slotIndex, table, team) {{
+  const ok = confirm("Silinsin mi?\\nTakım " + team + " / Masa " + table);
+  if (!ok) return;
+
+  const token = prompt("Admin şifresi:");
+  if (!token) return;
+
+  const res = await fetch('/api/delete', {{
+    method:'POST',
+    headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{ token, slot_index: slotIndex, table }})
+  }});
+
+  const data = await res.json();
+
+  if (!data.ok) {{
+    alert("❌ " + (data.error || "Silinemedi"));
+  }} else {{
     load();
   }}
 }}
@@ -395,6 +424,36 @@ def reset():
         with conn.cursor() as cur:
             cur.execute("TRUNCATE TABLE reservations;")
         conn.commit()
+
+    return jsonify({"ok": True})
+
+
+@app.post("/api/delete")
+def delete_one():
+    data = request.json or {}
+    token = data.get("token", "")
+    table = str(data.get("table", "")).strip()
+    slot_index = data.get("slot_index")
+
+    if token != ADMIN_TOKEN:
+        return jsonify({"ok": False, "error": "Yetkisiz"}), 401
+
+    try:
+        slot_index = int(slot_index)
+    except:
+        return jsonify({"ok": False, "error": "slot_index geçersiz"}), 400
+
+    if not table:
+        return jsonify({"ok": False, "error": "masa boş"}), 400
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM reservations WHERE "table"=%s AND slot_index=%s;', (table, slot_index))
+            deleted = cur.rowcount
+        conn.commit()
+
+    if deleted == 0:
+        return jsonify({"ok": False, "error": "Kayıt bulunamadı"}), 404
 
     return jsonify({"ok": True})
 
