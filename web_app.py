@@ -84,7 +84,8 @@ def parse_range(text):
 def get_reservations():
     with db_conn() as conn:
         with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute('SELECT team, "table", slot_index FROM reservations ORDER BY slot_index;')
+            cur.execute('SELECT id, team, "table", slot_index FROM reservations ORDER BY slot_index;')
+
             return cur.fetchall()
 
 
@@ -250,6 +251,29 @@ function changeMasa() {{
   document.getElementById("masaInput").value = cur ? parseInt(cur) : tableCount;
 }}
 
+async function delRes(id) {
+  const token = prompt("Admin şifresi:");
+  if (!token) return;
+
+  const ok = confirm("Bu rezervasyonu silmek istiyor musun?");
+  if (!ok) return;
+
+  const res = await fetch('/api/delete', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ token, id })
+  });
+
+  const data = await res.json();
+
+  if (!data.ok) {
+    alert("❌ " + (data.error || "Silinemedi"));
+  } else {
+    document.getElementById("msg").innerText = "🗑️ Rezervasyon silindi.";
+    load();
+  }
+}
+
 async function load() {{
   const res = await fetch('/api/state');
   const data = await res.json();
@@ -264,7 +288,7 @@ async function load() {{
 
   const taken = new Map();
   data.reservations.forEach(r => {{
-    taken.set(r.slot_index + "-" + r.table, r.team);
+    taken.set(r.slot_index + "-" + r.table, { team: r.team, id: r.id });
   }});
 
   data.slots.forEach((s,i) => {{
@@ -272,7 +296,9 @@ async function load() {{
     tables.forEach(t => {{
       let key = i + "-" + t;
       if (taken.has(key))
-        row += "<td class='taken'>Takım "+taken.get(key)+"</td>";
+        const info = taken.get(key);
+row += "<td class='taken' style='cursor:pointer' onclick='delRes("+info.id+")'>Takım "+info.team+"</td>";
+
       else
         row += "<td class='free'></td>";
     }});
@@ -397,6 +423,32 @@ def reset():
         conn.commit()
 
     return jsonify({"ok": True})
+
+@app.post("/api/delete")
+def delete_reservation():
+    data = request.json or {}
+    token = data.get("token", "")
+    rid = data.get("id")
+
+    if token != ADMIN_TOKEN:
+        return jsonify({"ok": False, "error": "Yetkisiz"}), 401
+
+    try:
+        rid = int(rid)
+    except Exception:
+        return jsonify({"ok": False, "error": "Geçersiz id"}), 400
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM reservations WHERE id = %s;", (rid,))
+            deleted = cur.rowcount
+        conn.commit()
+
+    if deleted == 0:
+        return jsonify({"ok": False, "error": "Rezervasyon bulunamadı"}), 404
+
+    return jsonify({"ok": True})
+
 
 
 if __name__ == "__main__":
