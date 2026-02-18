@@ -180,7 +180,7 @@ button {{
 <div id="modal">
   <div id="modalBox">
     <h3>Kaç masa var?</h3>
-    <p style="margin-top:0;">(Bir kere sorar. İstersen sonra değiştirebilirsin.)</p>
+    <p style="margin-top:0;">(Kaç adet deneme masası var?)</p>
     <input id="masaInput" type="number" min="1" style="width:120px;padding:6px;" />
     <button onclick="saveMasa()">Kaydet</button>
   </div>
