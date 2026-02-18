@@ -12,8 +12,16 @@ END = "17:00"
 STEP_MIN = 10
 
 # ---- ENV AYARLARI ----
-TABLE_COUNT_DEFAULT = int(os.getenv("TABLE_COUNT", "5"))  # web açılışında popup var, bu sadece default
+TABLE_COUNT_DEFAULT = int(os.getenv("TABLE_COUNT", "5"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "secret")
+
+# ---- MOD SEÇİMİ (DB varsa DB, yoksa RAM) ----
+DATABASE_URL = os.getenv("DATABASE_URL")
+USE_DB = bool(DATABASE_URL)
+
+# RAM MODE verisi (local için)
+_reservations_mem = []  # list[dict]: {id, team, table, slot_index}
+_next_id = 1
 
 
 # ---- ZAMAN YARDIMCILARI ----
@@ -36,13 +44,13 @@ slots = make_slots()
 
 # ---- DB ----
 def db_conn():
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL not set")
-    return psycopg.connect(url)
+    # Sadece DB modunda çağrılır
+    return psycopg.connect(DATABASE_URL)
 
 
 def init_db():
+    if not USE_DB:
+        return
     with db_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -58,10 +66,10 @@ def init_db():
         conn.commit()
 
 
-# Flask 3 uyumlu: ilk requestte bir kez init
+# DB modunda ilk requestte init
 @app.before_request
 def startup():
-    if not hasattr(app, "_db_inited"):
+    if USE_DB and not hasattr(app, "_db_inited"):
         init_db()
         app._db_inited = True
 
@@ -82,11 +90,13 @@ def parse_range(text):
 
 
 def get_reservations():
-    with db_conn() as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute('SELECT id, team, "table", slot_index FROM reservations ORDER BY slot_index;')
-
-            return cur.fetchall()
+    if USE_DB:
+        with db_conn() as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute('SELECT id, team, "table", slot_index FROM reservations ORDER BY slot_index;')
+                return cur.fetchall()
+    # RAM mode
+    return sorted(_reservations_mem, key=lambda r: r["slot_index"])
 
 
 def team_ok(res, team, idx):
@@ -116,10 +126,80 @@ def find_slot(res, team, pref_range, pref_table, table_count: int):
     return None, None, None
 
 
+def insert_reservation(team: int, table: str, slot_index: int):
+    global _next_id
+
+    if USE_DB:
+        with db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'INSERT INTO reservations(team,"table",slot_index) VALUES (%s,%s,%s);',
+                    (team, table, slot_index)
+                )
+            conn.commit()
+        return
+
+    # RAM mode uniqueness: same table+slot only once
+    for r in _reservations_mem:
+        if r["table"] == table and r["slot_index"] == slot_index:
+            raise RuntimeError("taken")
+
+    _reservations_mem.append({
+        "id": _next_id,
+        "team": team,
+        "table": table,
+        "slot_index": slot_index
+    })
+    _next_id += 1
+
+
+def reset_all():
+    global _reservations_mem, _next_id
+    if USE_DB:
+        with db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE reservations;")
+            conn.commit()
+        return
+
+    _reservations_mem = []
+    _next_id = 1
+
+
+def delete_by_team(team: int) -> int:
+    global _reservations_mem
+    if USE_DB:
+        with db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM reservations WHERE team = %s;', (team,))
+                deleted = cur.rowcount
+            conn.commit()
+        return deleted
+
+    before = len(_reservations_mem)
+    _reservations_mem = [r for r in _reservations_mem if r["team"] != team]
+    return before - len(_reservations_mem)
+
+
+def delete_by_table_slot(table: str, slot_index: int) -> int:
+    global _reservations_mem
+    if USE_DB:
+        with db_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM reservations WHERE "table" = %s AND slot_index = %s;', (table, slot_index))
+                deleted = cur.rowcount
+            conn.commit()
+        return deleted
+
+    before = len(_reservations_mem)
+    _reservations_mem = [r for r in _reservations_mem if not (r["table"] == table and r["slot_index"] == slot_index)]
+    return before - len(_reservations_mem)
+
+
 # ---- UI ----
 @app.get("/")
 def home():
-    # HTML içinde default table count kullanıyoruz, kullanıcı popup ile değiştirecek
+    badge = "DB: Postgres ✅" if USE_DB else "DB: RAM mode (geçici) ⚠️"
     return f"""
 <html>
 <head>
@@ -131,51 +211,23 @@ table {{ border-collapse: collapse; width: 100%; max-width: 1100px; }}
 td, th {{ border: 1px solid #aaa; padding: 6px; text-align:center; }}
 .free {{ background:#d9ffd9; }}
 .taken {{ background:#ffb3b3; }}
-
 .controls {{ display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px; }}
-
-button {{
-  padding: 8px 12px;
-  border: 0;
-  border-radius: 6px;
-  cursor: pointer;
-}}
-
-#resetBtn {{
-  background: #d11;
-  color: white;
-}}
-
-#reserveBtn {{
-  background: #0b6;
-  color: white;
-}}
-
-#modal {{
-  position: fixed;
-  top:0; left:0;
-  width:100%; height:100%;
-  background:rgba(0,0,0,0.6);
-  display:none;
-  align-items:center;
-  justify-content:center;
-  z-index: 9999;
-}}
-
-#modalBox {{
-  background:white;
-  padding:20px;
-  border-radius:10px;
-  width: min(420px, 92vw);
-}}
-
-#msg {{
-  margin: 8px 0 14px 0;
-  font-weight: 600;
-}}
+button {{ padding: 8px 12px; border: 0; border-radius: 6px; cursor: pointer; }}
+#resetBtn {{ background: #d11; color: white; }}
+#reserveBtn {{ background: #0b6; color: white; }}
+#deleteBtn {{ background: #555; color: white; }}
+#modal {{ position: fixed; top:0; left:0; width:100%; height:100%;
+  background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; z-index: 9999; }}
+#modalBox {{ background:white; padding:20px; border-radius:10px; width: min(520px, 92vw); }}
+#msg {{ margin: 8px 0 14px 0; font-weight: 600; }}
+.small {{ font-size: 12px; opacity: 0.85; }}
+hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
+.badge {{ display:inline-block; padding:4px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; }}
 </style>
 </head>
 <body>
+
+<div class="badge">{badge}</div>
 
 <div id="modal">
   <div id="modalBox">
@@ -183,6 +235,29 @@ button {{
     <p style="margin-top:0;">(Kaç adet deneme masası var?)</p>
     <input id="masaInput" type="number" min="1" style="width:120px;padding:6px;" />
     <button onclick="saveMasa()">Kaydet</button>
+
+    <hr/>
+
+    <h3>🗑️ Rezervasyon Sil (Admin)</h3>
+    <p class="small">Takım numarasıyla toplu sil veya masa+saat ile tek sil.</p>
+
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <label>Takım:
+        <input id="delTeam" type="number" style="width:110px;" />
+      </label>
+
+      <label>Masa:
+        <select id="delTable"></select>
+      </label>
+
+      <label>Saat:
+        <select id="delSlot"></select>
+      </label>
+
+      <button id="deleteBtn" onclick="deleteReservation()">Sil</button>
+    </div>
+
+    <p class="small" style="margin-bottom:0;">Not: Silme için admin şifresi sorulacak.</p>
   </div>
 </div>
 
@@ -202,10 +277,8 @@ button {{
   </label>
 
   <button id="reserveBtn" onclick="reserve()">Rezervasyon Al</button>
-
   <button id="resetBtn" onclick="resetTable()">Tabloyu Sıfırla</button>
-
-  <button onclick="changeMasa()">Masa Sayısını Değiştir</button>
+  <button onclick="changeMasa()">Masa Sayısını Değiştir / Silme Menüsü</button>
 </div>
 
 <p id="msg"></p>
@@ -214,16 +287,31 @@ button {{
 <script>
 let tables = [];
 let tableCount = {TABLE_COUNT_DEFAULT};
+let slotLabels = [];
 
 function buildTables(n) {{
   tableCount = n;
   tables = [];
   const select = document.getElementById("table");
+  const delSelect = document.getElementById("delTable");
+
   select.innerHTML = "<option>Auto</option>";
+  delSelect.innerHTML = "<option>Seç</option>";
+
   for (let i=1; i<=n; i++) {{
     tables.push(String(i));
     select.innerHTML += "<option>"+i+"</option>";
+    delSelect.innerHTML += "<option>"+i+"</option>";
   }}
+}}
+
+function buildSlotsForDelete(slots) {{
+  slotLabels = slots.map(s => s[0] + "-" + s[1]);
+  const sel = document.getElementById("delSlot");
+  sel.innerHTML = "<option>Seç</option>";
+  slotLabels.forEach(lbl => {{
+    sel.innerHTML += "<option>"+lbl+"</option>";
+  }});
 }}
 
 function initTables() {{
@@ -251,32 +339,11 @@ function changeMasa() {{
   document.getElementById("masaInput").value = cur ? parseInt(cur) : tableCount;
 }}
 
-async function delRes(id) {
-  const token = prompt("Admin şifresi:");
-  if (!token) return;
-
-  const ok = confirm("Bu rezervasyonu silmek istiyor musun?");
-  if (!ok) return;
-
-  const res = await fetch('/api/delete', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ token, id })
-  });
-
-  const data = await res.json();
-
-  if (!data.ok) {
-    alert("❌ " + (data.error || "Silinemedi"));
-  } else {
-    document.getElementById("msg").innerText = "🗑️ Rezervasyon silindi.";
-    load();
-  }
-}
-
 async function load() {{
   const res = await fetch('/api/state');
   const data = await res.json();
+
+  buildSlotsForDelete(data.slots);
 
   const grid = document.getElementById("grid");
   grid.innerHTML = "";
@@ -288,7 +355,7 @@ async function load() {{
 
   const taken = new Map();
   data.reservations.forEach(r => {{
-    taken.set(r.slot_index + "-" + r.table, { team: r.team, id: r.id });
+    taken.set(r.slot_index + "-" + r.table, r.team);
   }});
 
   data.slots.forEach((s,i) => {{
@@ -296,9 +363,7 @@ async function load() {{
     tables.forEach(t => {{
       let key = i + "-" + t;
       if (taken.has(key))
-        const info = taken.get(key);
-row += "<td class='taken' style='cursor:pointer' onclick='delRes("+info.id+")'>Takım "+info.team+"</td>";
-
+        row += "<td class='taken'>Takım "+taken.get(key)+"</td>";
       else
         row += "<td class='free'></td>";
     }});
@@ -352,6 +417,51 @@ async function resetTable() {{
   }}
 }}
 
+async function deleteReservation() {{
+  const token = prompt("Admin şifresi:");
+  if (!token) return;
+
+  const delTeam = document.getElementById("delTeam").value;
+  const delTable = document.getElementById("delTable").value;
+  const delSlot = document.getElementById("delSlot").value;
+
+  if (delTeam) {{
+    const team = parseInt(delTeam);
+    const res = await fetch('/api/delete', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{ token, team }})
+    }});
+    const data = await res.json();
+    if (!data.ok) alert("❌ " + data.error);
+    else alert("✅ " + data.message);
+    document.getElementById("delTeam").value = "";
+    load();
+    return;
+  }}
+
+  if (delTable === "Seç" || delSlot === "Seç") {{
+    alert("Takım gir ya da Masa + Saat seç.");
+    return;
+  }}
+
+  const slot_index = slotLabels.indexOf(delSlot);
+  if (slot_index < 0) {{
+    alert("Saat bulunamadı.");
+    return;
+  }}
+
+  const res = await fetch('/api/delete', {{
+    method: 'POST',
+    headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{ token, table: delTable, slot_index }})
+  }});
+  const data = await res.json();
+  if (!data.ok) alert("❌ " + data.error);
+  else alert("✅ " + data.message);
+  load();
+}}
+
 buildTables(tableCount);
 initTables();
 </script>
@@ -396,13 +506,7 @@ def reserve():
         return jsonify({"ok": False, "error": "Uygun slot bulunamadı"})
 
     try:
-        with db_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    'INSERT INTO reservations(team,"table",slot_index) VALUES (%s,%s,%s);',
-                    (team, t, idx)
-                )
-            conn.commit()
+        insert_reservation(team, t, idx)
     except Exception:
         return jsonify({"ok": False, "error": "Slot az önce alındı, tekrar dene"})
 
@@ -417,40 +521,37 @@ def reset():
     if token != ADMIN_TOKEN:
         return jsonify({"ok": False, "error": "Yetkisiz"}), 401
 
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE TABLE reservations;")
-        conn.commit()
-
+    reset_all()
     return jsonify({"ok": True})
 
+
 @app.post("/api/delete")
-def delete_reservation():
+def delete():
     data = request.json or {}
     token = data.get("token", "")
-    rid = data.get("id")
 
     if token != ADMIN_TOKEN:
         return jsonify({"ok": False, "error": "Yetkisiz"}), 401
 
-    try:
-        rid = int(rid)
-    except Exception:
-        return jsonify({"ok": False, "error": "Geçersiz id"}), 400
+    team = data.get("team", None)
+    table = data.get("table", None)
+    slot_index = data.get("slot_index", None)
 
-    with db_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM reservations WHERE id = %s;", (rid,))
-            deleted = cur.rowcount
-        conn.commit()
+    if isinstance(team, int):
+        deleted = delete_by_team(team)
+        return jsonify({"ok": True, "message": f"Takım {team} için {deleted} rezervasyon silindi."})
 
-    if deleted == 0:
-        return jsonify({"ok": False, "error": "Rezervasyon bulunamadı"}), 404
+    if isinstance(table, str) and (isinstance(slot_index, int) or (isinstance(slot_index, str) and slot_index.isdigit())):
+        slot_index = int(slot_index)
+        deleted = delete_by_table_slot(table, slot_index)
+        if deleted == 0:
+            return jsonify({"ok": False, "error": "Bu masa+saat için rezervasyon bulunamadı."})
+        return jsonify({"ok": True, "message": "Rezervasyon silindi."})
 
-    return jsonify({"ok": True})
-
+    return jsonify({"ok": False, "error": "Silme için ya team ya da table+slot_index göndermelisin."}), 400
 
 
 if __name__ == "__main__":
+    # Localde de çalışsın diye: DB yoksa init_db no-op zaten.
     init_db()
     app.run(debug=True)
