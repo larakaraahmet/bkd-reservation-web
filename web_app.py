@@ -218,11 +218,23 @@ button {{ padding: 8px 12px; border: 0; border-radius: 6px; cursor: pointer; }}
 #deleteBtn {{ background: #555; color: white; }}
 #modal {{ position: fixed; top:0; left:0; width:100%; height:100%;
   background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; z-index: 9999; }}
-#modalBox {{ background:white; padding:20px; border-radius:10px; width: min(520px, 92vw); }}
+#modalBox {{ position: relative; background:white; padding:20px; border-radius:10px; width: min(520px, 92vw); }}
 #msg {{ margin: 8px 0 14px 0; font-weight: 600; }}
 .small {{ font-size: 12px; opacity: 0.85; }}
 hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
 .badge {{ display:inline-block; padding:4px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; }}
+
+/* ✅ Modal kapatma tuşu */
+.closeX {{
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  font-size: 22px;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+  line-height: 1;
+}}
 </style>
 </head>
 <body>
@@ -231,6 +243,8 @@ hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
 
 <div id="modal">
   <div id="modalBox">
+    <button class="closeX" onclick="closeModal()" aria-label="Kapat">✕</button>
+
     <h3>Kaç masa var?</h3>
     <p style="margin-top:0;">(Kaç adet deneme masası var?)</p>
     <input id="masaInput" type="number" min="1" style="width:120px;padding:6px;" />
@@ -289,6 +303,10 @@ let tables = [];
 let tableCount = {TABLE_COUNT_DEFAULT};
 let slotLabels = [];
 
+function closeModal() {{
+  document.getElementById("modal").style.display = "none";
+}}
+
 function buildTables(n) {{
   tableCount = n;
   tables = [];
@@ -328,7 +346,7 @@ function saveMasa() {{
   const n = parseInt(document.getElementById("masaInput").value);
   if (!n || n < 1) return;
   localStorage.setItem("masa_sayisi", n);
-  document.getElementById("modal").style.display = "none";
+  closeModal();
   buildTables(n);
   load();
 }}
@@ -464,6 +482,12 @@ async function deleteReservation() {{
 
 buildTables(tableCount);
 initTables();
+
+/* ✅ BONUS: modal dışına tıklayınca kapansın */
+window.addEventListener("click", (e) => {{
+  const modal = document.getElementById("modal");
+  if (e.target === modal) closeModal();
+}});
 </script>
 
 </body>
