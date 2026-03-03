@@ -93,8 +93,8 @@ def init_db():
             """)
 
             # Migration: day / area kolonları
-            cur.execute('ALTER TABLE reservations ADD COLUMN IF NOT EXISTS day TEXT NOT NULL DEFAULT %s;', ("Day1",))
-            cur.execute('ALTER TABLE reservations ADD COLUMN IF NOT EXISTS area TEXT NOT NULL DEFAULT %s;', ("A",))
+            cur.execute("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS day TEXT NOT NULL DEFAULT 'Day1';")
+            cur.execute("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS area TEXT NOT NULL DEFAULT 'A';")
 
             # Unique constraint migration:
             # Eski unique (table, slot_index) varsa bile DB hata vermesin diye IF NOT EXISTS ile yeni index.
