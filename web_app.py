@@ -750,8 +750,7 @@ function copyWhatsapp() {{
   const text = rows.join("\\n");
   navigator.clipboard.writeText(text);
   toast("WhatsApp metni kopyalandı ✅");
-}
-
+  }}
 // ---- ADMIN (15 dk session) ----
 function getAdminToken() {{
   const raw = sessionStorage.getItem("admin_token") || "";
