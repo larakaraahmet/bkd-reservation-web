@@ -4,6 +4,11 @@ import os
 import psycopg
 import psycopg.rows
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+
 app = Flask(__name__)
 
 # ---- ZAMAN AYARLARI ----
@@ -14,6 +19,9 @@ STEP_MIN = 10
 # ---- ENV AYARLARI ----
 TABLE_COUNT_DEFAULT = int(os.getenv("TABLE_COUNT", "5"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "secret")
+
+# Saat dilimi (Render’da ENV’e de koymak iyi: TZ=Europe/Istanbul)
+APP_TZ = os.getenv("TZ", "Europe/Istanbul")
 
 # ---- MOD SEÇİMİ (DB varsa DB, yoksa RAM) ----
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -40,6 +48,26 @@ def make_slots():
 
 
 slots = make_slots()
+
+
+def minutes_from_hhmm(hhmm: str) -> int:
+    d = to_dt(hhmm)
+    return d.hour * 60 + d.minute
+
+
+def ceil_to_step(mins: int, step: int) -> int:
+    return ((mins + step - 1) // step) * step
+
+
+def now_local_minutes() -> int:
+    if ZoneInfo:
+        try:
+            n = datetime.now(ZoneInfo(APP_TZ))
+            return n.hour * 60 + n.minute
+        except Exception:
+            pass
+    n = datetime.now()
+    return n.hour * 60 + n.minute
 
 
 # ---- DB ----
@@ -95,7 +123,6 @@ def get_reservations():
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute('SELECT id, team, "table", slot_index FROM reservations ORDER BY slot_index;')
                 return cur.fetchall()
-    # RAM mode
     return sorted(_reservations_mem, key=lambda r: r["slot_index"])
 
 
@@ -110,7 +137,14 @@ def free(res, table, idx):
 def find_slot(res, team, pref_range, pref_table, table_count: int):
     tables = [str(i) for i in range(1, table_count + 1)]
 
+    # ✅ geçmiş slotları vermemek için
+    earliest_m = ceil_to_step(now_local_minutes(), STEP_MIN)
+
     for i, s in enumerate(slots):
+        # geçmiş slotu atla
+        if minutes_from_hhmm(s[0]) < earliest_m:
+            continue
+
         st = to_dt(s[0])
 
         if pref_range:
@@ -139,7 +173,6 @@ def insert_reservation(team: int, table: str, slot_index: int):
             conn.commit()
         return
 
-    # RAM mode uniqueness: same table+slot only once
     for r in _reservations_mem:
         if r["table"] == table and r["slot_index"] == slot_index:
             raise RuntimeError("taken")
@@ -224,7 +257,6 @@ button {{ padding: 8px 12px; border: 0; border-radius: 6px; cursor: pointer; }}
 hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
 .badge {{ display:inline-block; padding:4px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; }}
 
-/* ✅ Modal kapatma tuşu */
 .closeX {{
   position: absolute;
   top: 12px;
@@ -235,9 +267,43 @@ hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
   border: none;
   line-height: 1;
 }}
+
+/* ✅ Sağ üst saat */
+#clock {{
+  position: fixed;
+  top: 14px;
+  right: 16px;
+  background: rgba(255,255,255,0.92);
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  z-index: 10000;
+}}
+
+/* ✅ Takım arama */
+.searchBox {{
+  display:flex;
+  gap:10px;
+  align-items:center;
+  flex-wrap:wrap;
+}}
+#teamSearch {{
+  width: 160px;
+  padding: 7px 10px;
+  border: 1px solid #aaa;
+  border-radius: 8px;
+}}
+.hl {{ outline: 3px solid #000; }}
+.dim {{ opacity: 0.18; }}
 </style>
 </head>
 <body>
+
+<div id="clock"></div>
 
 <div class="badge">{badge}</div>
 
@@ -293,6 +359,16 @@ hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
   <button id="reserveBtn" onclick="reserve()">Rezervasyon Al</button>
   <button id="resetBtn" onclick="resetTable()">Tabloyu Sıfırla</button>
   <button onclick="changeMasa()">Masa Sayısını Değiştir / Silme Menüsü</button>
+
+  <div class="searchBox">
+    <label>Takım Ara:
+      <input id="teamSearch" placeholder="örn: 3641" oninput="applyTeamFilter()" />
+    </label>
+    <label style="user-select:none;">
+      <input id="onlyThisTeam" type="checkbox" onchange="applyTeamFilter()" />
+      Sadece bu takımı göster
+    </label>
+  </div>
 </div>
 
 <p id="msg"></p>
@@ -302,6 +378,21 @@ hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
 let tables = [];
 let tableCount = {TABLE_COUNT_DEFAULT};
 let slotLabels = [];
+
+function pad2(n) {{ return String(n).padStart(2, "0"); }}
+
+function startClock() {{
+  const el = document.getElementById("clock");
+  if(!el) return;
+  function tick() {{
+    const d = new Date();
+    el.innerText = pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+  }}
+  tick();
+  setInterval(tick, 250);
+}}
+
+startClock();
 
 function closeModal() {{
   document.getElementById("modal").style.display = "none";
@@ -357,6 +448,34 @@ function changeMasa() {{
   document.getElementById("masaInput").value = cur ? parseInt(cur) : tableCount;
 }}
 
+function getSearchTeam() {{
+  const v = (document.getElementById("teamSearch")?.value || "").trim();
+  if (!v) return null;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : null;
+}}
+
+function applyTeamFilter() {{
+  const team = getSearchTeam();
+  const only = document.getElementById("onlyThisTeam")?.checked;
+
+  const grid = document.getElementById("grid");
+  if (!grid) return;
+
+  grid.querySelectorAll("td").forEach(td => {{
+    td.classList.remove("hl");
+    td.classList.remove("dim");
+  }});
+
+  if (!team) return;
+
+  grid.querySelectorAll("td[data-team]").forEach(td => {{
+    const t = parseInt(td.getAttribute("data-team"), 10);
+    if (t === team) td.classList.add("hl");
+    else if (only) td.classList.add("dim");
+  }});
+}}
+
 async function load() {{
   const res = await fetch('/api/state');
   const data = await res.json();
@@ -380,14 +499,18 @@ async function load() {{
     let row = "<tr><td>"+s[0]+"-"+s[1]+"</td>";
     tables.forEach(t => {{
       let key = i + "-" + t;
-      if (taken.has(key))
-        row += "<td class='taken'>Takım "+taken.get(key)+"</td>";
-      else
+      if (taken.has(key)) {{
+        const team = taken.get(key);
+        row += "<td class='taken' data-team='"+team+"'>Takım "+team+"</td>";
+      }} else {{
         row += "<td class='free'></td>";
+      }}
     }});
     row += "</tr>";
     grid.innerHTML += row;
   }});
+
+  applyTeamFilter();
 }}
 
 async function reserve() {{
@@ -483,11 +606,19 @@ async function deleteReservation() {{
 buildTables(tableCount);
 initTables();
 
-/* ✅ BONUS: modal dışına tıklayınca kapansın */
+/* ✅ Modal dışına tıklayınca kapansın */
 window.addEventListener("click", (e) => {{
   const modal = document.getElementById("modal");
   if (e.target === modal) closeModal();
 }});
+
+/* ✅ Auto-refresh: 10 saniyede bir */
+setInterval(() => {{
+  // modal açıkken rahatsız etmesin
+  const modal = document.getElementById("modal");
+  const isOpen = modal && modal.style.display === "flex";
+  if (!isOpen) load();
+}}, 10000);
 </script>
 
 </body>
@@ -576,6 +707,5 @@ def delete():
 
 
 if __name__ == "__main__":
-    # Localde de çalışsın diye: DB yoksa init_db no-op zaten.
     init_db()
     app.run(debug=True)
