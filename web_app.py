@@ -27,9 +27,12 @@ APP_TZ = os.getenv("TZ", "Europe/Istanbul")
 DATABASE_URL = os.getenv("DATABASE_URL")
 USE_DB = bool(DATABASE_URL)
 
-# RAM MODE verisi (local için)
-_reservations_mem = []  # {id, team, table, slot_index, day, area}
+# RAM MODE (local için)
+_reservations_mem = []  # {id, tournament_id, team, table, slot_index}
 _next_id = 1
+
+# ---- Turnuva default ----
+DEFAULT_TOURNAMENT_ID = os.getenv("DEFAULT_TOURNAMENT_ID", "ist_ms_1")
 
 
 # ---- ZAMAN YARDIMCILARI ----
@@ -70,16 +73,12 @@ def now_local_minutes() -> int:
     return n.hour * 60 + n.minute
 
 
-def norm_day_area(day, area):
-    day = (day or "Day1").strip()
-    area = (area or "A").strip()
-    if day not in ("Day1", "Day2"):
-        day = "Day1"
-    if area not in ("A", "B"):
-        area = "A"
-    return day, area
+def norm_tournament_id(tournament_id: str | None) -> str:
+    tid = (tournament_id or "").strip()
+    return tid if tid else DEFAULT_TOURNAMENT_ID
 
 
+# ---- DB ----
 def db_conn():
     return psycopg.connect(DATABASE_URL)
 
@@ -92,6 +91,7 @@ def init_db():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS reservations (
                     id SERIAL PRIMARY KEY,
+                    tournament_id TEXT NOT NULL,
                     team INTEGER NOT NULL,
                     "table" TEXT NOT NULL,
                     slot_index INTEGER NOT NULL,
@@ -99,14 +99,13 @@ def init_db():
                 );
             """)
 
-            # migration: day/area
-            cur.execute("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS day TEXT NOT NULL DEFAULT 'Day1';")
-            cur.execute("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS area TEXT NOT NULL DEFAULT 'A';")
+            # eski tabloda tournament_id yoksa ekle
+            cur.execute("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS tournament_id TEXT NOT NULL DEFAULT 'ist_ms_1';")
 
-            # unique index: same day+area+table+slot only once
+            # unique index (aynı turnuvada aynı masa+slot sadece 1 kere)
             cur.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS reservations_unique_slot
-                ON reservations(day, area, "table", slot_index);
+                CREATE UNIQUE INDEX IF NOT EXISTS reservations_unique_slot_v2
+                ON reservations(tournament_id, "table", slot_index);
             """)
         conn.commit()
 
@@ -133,22 +132,24 @@ def parse_range(text):
         return None
 
 
-def get_reservations(day="Day1", area="A"):
-    day, area = norm_day_area(day, area)
+def get_reservations(tournament_id: str):
+    tournament_id = norm_tournament_id(tournament_id)
+
     if USE_DB:
         with db_conn() as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
-                    'SELECT id, team, "table", slot_index, day, area FROM reservations WHERE day=%s AND area=%s ORDER BY slot_index;',
-                    (day, area)
+                    'SELECT id, tournament_id, team, "table", slot_index FROM reservations WHERE tournament_id=%s ORDER BY slot_index;',
+                    (tournament_id,)
                 )
                 return cur.fetchall()
 
-    res = [r for r in _reservations_mem if r.get("day") == day and r.get("area") == area]
+    res = [r for r in _reservations_mem if r.get("tournament_id") == tournament_id]
     return sorted(res, key=lambda r: r["slot_index"])
 
 
 def team_ok(res, team, idx):
+    # 3 slot aralığı kuralı (admin değilse)
     return all(not (r["team"] == team and abs(r["slot_index"] - idx) < 3) for r in res)
 
 
@@ -185,19 +186,19 @@ def find_slot(res, team, pref_range, pref_table, table_count: int, allow_past: b
     return None, None, None
 
 
-def insert_reservation(day: str, area: str, team: int, table: str, slot_index: int):
+def insert_reservation(tournament_id: str, team: int, table: str, slot_index: int):
     global _next_id
-    day, area = norm_day_area(day, area)
+    tournament_id = norm_tournament_id(tournament_id)
 
     if USE_DB:
         with db_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO reservations(day, area, team, "table", slot_index)
-                    VALUES (%s,%s,%s,%s,%s)
-                    ON CONFLICT (day, area, "table", slot_index) DO NOTHING
+                    INSERT INTO reservations(tournament_id, team, "table", slot_index)
+                    VALUES (%s,%s,%s,%s)
+                    ON CONFLICT (tournament_id, "table", slot_index) DO NOTHING
                     RETURNING id;
-                """, (day, area, team, table, slot_index))
+                """, (tournament_id, team, table, slot_index))
                 row = cur.fetchone()
             conn.commit()
         if row is None:
@@ -205,47 +206,46 @@ def insert_reservation(day: str, area: str, team: int, table: str, slot_index: i
         return
 
     for r in _reservations_mem:
-        if r["day"] == day and r["area"] == area and r["table"] == table and r["slot_index"] == slot_index:
+        if r["tournament_id"] == tournament_id and r["table"] == table and r["slot_index"] == slot_index:
             raise RuntimeError("taken")
 
     _reservations_mem.append({
         "id": _next_id,
+        "tournament_id": tournament_id,
         "team": team,
         "table": table,
-        "slot_index": slot_index,
-        "day": day,
-        "area": area
+        "slot_index": slot_index
     })
     _next_id += 1
 
 
-def delete_by_team(day: str, area: str, team: int) -> int:
+def delete_by_team(tournament_id: str, team: int) -> int:
     global _reservations_mem
-    day, area = norm_day_area(day, area)
+    tournament_id = norm_tournament_id(tournament_id)
 
     if USE_DB:
         with db_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute('DELETE FROM reservations WHERE day=%s AND area=%s AND team=%s;', (day, area, team))
+                cur.execute('DELETE FROM reservations WHERE tournament_id=%s AND team=%s;', (tournament_id, team))
                 deleted = cur.rowcount
             conn.commit()
         return deleted
 
     before = len(_reservations_mem)
-    _reservations_mem = [r for r in _reservations_mem if not (r["day"] == day and r["area"] == area and r["team"] == team)]
+    _reservations_mem = [r for r in _reservations_mem if not (r["tournament_id"] == tournament_id and r["team"] == team)]
     return before - len(_reservations_mem)
 
 
-def delete_by_table_slot(day: str, area: str, table: str, slot_index: int) -> int:
+def delete_by_table_slot(tournament_id: str, table: str, slot_index: int) -> int:
     global _reservations_mem
-    day, area = norm_day_area(day, area)
+    tournament_id = norm_tournament_id(tournament_id)
 
     if USE_DB:
         with db_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    'DELETE FROM reservations WHERE day=%s AND area=%s AND "table"=%s AND slot_index=%s;',
-                    (day, area, table, slot_index)
+                    'DELETE FROM reservations WHERE tournament_id=%s AND "table"=%s AND slot_index=%s;',
+                    (tournament_id, table, slot_index)
                 )
                 deleted = cur.rowcount
             conn.commit()
@@ -254,23 +254,23 @@ def delete_by_table_slot(day: str, area: str, table: str, slot_index: int) -> in
     before = len(_reservations_mem)
     _reservations_mem = [
         r for r in _reservations_mem
-        if not (r["day"] == day and r["area"] == area and r["table"] == table and r["slot_index"] == slot_index)
+        if not (r["tournament_id"] == tournament_id and r["table"] == table and r["slot_index"] == slot_index)
     ]
     return before - len(_reservations_mem)
 
 
-def reset_area(day: str, area: str):
+def reset_tournament(tournament_id: str):
     global _reservations_mem, _next_id
-    day, area = norm_day_area(day, area)
+    tournament_id = norm_tournament_id(tournament_id)
 
     if USE_DB:
         with db_conn() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM reservations WHERE day=%s AND area=%s;", (day, area))
+                cur.execute("DELETE FROM reservations WHERE tournament_id=%s;", (tournament_id,))
             conn.commit()
         return
 
-    _reservations_mem = [r for r in _reservations_mem if not (r["day"] == day and r["area"] == area)]
+    _reservations_mem = [r for r in _reservations_mem if r["tournament_id"] != tournament_id]
     if not _reservations_mem:
         _next_id = 1
 
@@ -335,7 +335,6 @@ td, th { border: 1px solid #aaa; padding: 6px; text-align:center; }
 .dim { opacity: 0.18; }
 
 #wrap { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
-
 #side {
   position: sticky;
   top: 110px;
@@ -360,12 +359,10 @@ td, th { border: 1px solid #aaa; padding: 6px; text-align:center; }
 }
 
 #gridWrap { overflow-x: auto; }
-
 .stickyTime { position: sticky; left: 0; background: white; z-index: 2; }
 .stickyHead { position: sticky; top: 0; background: white; z-index: 3; }
 
 input, select { padding: 7px 10px; border: 1px solid #aaa; border-radius: 10px; }
-
 .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
 
 /* Modal (masa sayısı + silme) */
@@ -384,7 +381,7 @@ input, select { padding: 7px 10px; border: 1px solid #aaa; border-radius: 10px; 
   background:white;
   padding:18px;
   border-radius:14px;
-  width: min(560px, 92vw);
+  width: min(640px, 92vw);
 }
 .closeX {
   position: absolute;
@@ -415,6 +412,12 @@ hr { border:none; border-top:1px solid #ddd; margin: 14px 0; }
   width:min(420px,92vw);
   position:relative;
 }
+
+#tMeta {
+  margin-top: -4px;
+  margin-bottom: 12px;
+  opacity: 0.85;
+}
 </style>
 </head>
 <body>
@@ -427,19 +430,11 @@ hr { border:none; border-top:1px solid #ddd; margin: 14px 0; }
 
 <h2>Robot Reservation</h2>
 
-<div class="controls">
-  <label>Gün:
-    <select id="daySel" onchange="saveContextAndReload()">
-      <option value="Day1">Day1</option>
-      <option value="Day2">Day2</option>
-    </select>
-  </label>
+<div id="tMeta" class="small"></div>
 
-  <label>Alan:
-    <select id="areaSel" onchange="saveContextAndReload()">
-      <option value="A">A</option>
-      <option value="B">B</option>
-    </select>
+<div class="controls">
+  <label>Turnuva:
+    <select id="tSel" onchange="saveTournamentAndReload()"></select>
   </label>
 
   <label>Takım:
@@ -455,7 +450,7 @@ hr { border:none; border-top:1px solid #ddd; margin: 14px 0; }
   </label>
 
   <button id="reserveBtn" onclick="reserve()">Rezervasyon Al</button>
-  <button id="resetBtn" onclick="resetTable()">Alanı Sıfırla</button>
+  <button id="resetBtn" onclick="resetTournament()">Turnuvayı Sıfırla</button>
   <button id="exportBtn" onclick="exportCsv()">CSV İndir</button>
   <button onclick="openMasaModal()">Masa Sayısı / Silme</button>
 
@@ -530,7 +525,9 @@ hr { border:none; border-top:1px solid #ddd; margin: 14px 0; }
       <button id="deleteBtn" onclick="deleteReservation()">Sil</button>
     </div>
 
-    <p class="small" style="margin-bottom:0;">Not: Silme için admin şifresi (token) gerekir. Admin Login yaptıysan sormadan kullanır, yoksa prompt açar.</p>
+    <p class="small" style="margin-bottom:0;">
+      Not: Silme için admin şifresi gerekir. Admin Login yaptıysan sormadan kullanır, yoksa prompt açar.
+    </p>
   </div>
 </div>
 
@@ -552,7 +549,29 @@ let tables = [];
 let tableCount = %%TABLE_COUNT_DEFAULT%%;
 let slotLabels = [];
 let lastState = null;
-let lastClicked = null; // {table, slot_index, timeLabel, existingTeam}
+
+// ✅ Turnuva listesi
+const TOURNAMENTS = [
+  { id: "ist_ms_1", label: "İstanbul • 7 Şubat • 1. İstanbul Ortaokul Yerel Turnuvası", city:"İstanbul", date:"7 Şubat Cumartesi", venue:"Yeditepe Üniversitesi" },
+  { id: "ist_hs_1", label: "İstanbul • 8 Şubat • İstanbul Lise Yerel Turnuvası", city:"İstanbul", date:"8 Şubat Pazar", venue:"Yeditepe Üniversitesi" },
+  { id: "ank_ms",   label: "Ankara • 7 Şubat • Ankara Ortaokul Yerel Turnuvası", city:"Ankara", date:"7 Şubat Cumartesi", venue:"Çankaya Üniversitesi" },
+  { id: "ank_hs",   label: "Ankara • 8 Şubat • Ankara Lise Yerel Turnuvası", city:"Ankara", date:"8 Şubat Pazar", venue:"Çankaya Üniversitesi" },
+  { id: "izm_ms_1", label: "İzmir • 14 Şubat • 1. İzmir Ortaokul Yerel Turnuvası", city:"İzmir", date:"14 Şubat Cumartesi", venue:"fuarizmir" },
+  { id: "izm_hs_1", label: "İzmir • 15 Şubat • İzmir Lise Yerel Turnuvası", city:"İzmir", date:"15 Şubat Pazar", venue:"fuarizmir" },
+  { id: "mer_ms",   label: "Mersin • 14 Şubat • Mersin Ortaokul Yerel Turnuvası", city:"Mersin", date:"14 Şubat Cumartesi", venue:"Yenişehir Belediyesi Atatürk Kültür Merkezi" },
+  { id: "mer_hs",   label: "Mersin • 15 Şubat • Mersin Lise Yerel Turnuvası", city:"Mersin", date:"15 Şubat Pazar", venue:"Yenişehir Belediyesi Atatürk Kültür Merkezi" },
+  { id: "ord_ms",   label: "Ordu • 14 Şubat • Ordu Ortaokul Yerel Turnuvası", city:"Ordu", date:"14 Şubat Cumartesi", venue:"Ordu Üniversitesi" },
+  { id: "ord_hs",   label: "Ordu • 15 Şubat • Ordu Lise Yerel Turnuvası", city:"Ordu", date:"15 Şubat Pazar", venue:"Ordu Üniversitesi" },
+  { id: "izm_ms_2", label: "İzmir • 21 Şubat • 2. İzmir Ortaokul Yerel Turnuvası", city:"İzmir", date:"21 Şubat Cumartesi", venue:"fuarizmir" },
+  { id: "izm_ms_3", label: "İzmir • 22 Şubat • 3. İzmir Ortaokul Yerel Turnuvası", city:"İzmir", date:"22 Şubat Pazar", venue:"fuarizmir" },
+  { id: "ant_ms",   label: "Antalya • 21 Şubat • Antalya Ortaokul Yerel Turnuvası", city:"Antalya", date:"21 Şubat Cumartesi", venue:"ANFAŞ – Uluslararası Fuar ve Kongre Merkezi" },
+  { id: "ant_hs",   label: "Antalya • 22 Şubat • Antalya Lise Yerel Turnuvası", city:"Antalya", date:"22 Şubat Pazar", venue:"ANFAŞ – Uluslararası Fuar ve Kongre Merkezi" },
+  { id: "ist_ms_2", label: "İstanbul • 28 Şubat • 2. İstanbul Ortaokul Yerel Turnuvası", city:"İstanbul", date:"28 Şubat Cumartesi", venue:"Gebze Teknik Üniversitesi" },
+  { id: "ist_ms_3", label: "İstanbul • 1 Mart • 3. İstanbul Ortaokul Yerel Turnuvası", city:"İstanbul", date:"1 Mart Pazar", venue:"Gebze Teknik Üniversitesi" },
+  { id: "esk_ms",   label: "Eskişehir • 28 Şubat • Eskişehir Ortaokul Yerel Turnuvası", city:"Eskişehir", date:"28 Şubat Cumartesi", venue:"Atayurt Okulları" },
+  { id: "esk_hs",   label: "Eskişehir • 1 Mart • Eskişehir Lise Yerel Turnuvası", city:"Eskişehir", date:"1 Mart Pazar", venue:"Atayurt Okulları" },
+  { id: "nat",      label: "İzmir • 7-8 Mart • Ulusal Turnuva", city:"İzmir", date:"7-8 Mart", venue:"fuarizmir" },
+];
 
 function pad2(n) { return String(n).padStart(2, "0"); }
 
@@ -583,24 +602,44 @@ function normalizeRange() {
   el.value = v;
 }
 
-function getContext() {
-  const day = document.getElementById("daySel").value;
-  const area = document.getElementById("areaSel").value;
-  return {day, area};
+/* ---- TURNOVA ---- */
+function getTournamentId() {
+  return document.getElementById("tSel").value;
 }
 
-function saveContextAndReload() {
-  const {day, area} = getContext();
-  localStorage.setItem("ctx_day", day);
-  localStorage.setItem("ctx_area", area);
+function findTournament(tid) {
+  return TOURNAMENTS.find(x => x.id === tid) || TOURNAMENTS[0];
+}
+
+function renderTournamentMeta() {
+  const tid = getTournamentId();
+  const t = findTournament(tid);
+  document.getElementById("tMeta").innerText = "Mekan: " + t.venue + "  |  Şehir: " + t.city + "  |  Tarih: " + t.date;
+}
+
+function buildTournamentSelect() {
+  const sel = document.getElementById("tSel");
+  sel.innerHTML = "";
+  TOURNAMENTS.forEach(t => {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.label;
+    sel.appendChild(opt);
+  });
+}
+
+function restoreTournament() {
+  const saved = localStorage.getItem("ctx_tournament_id") || "";
+  const exists = TOURNAMENTS.some(t => t.id === saved);
+  document.getElementById("tSel").value = exists ? saved : TOURNAMENTS[0].id;
+  renderTournamentMeta();
+}
+
+function saveTournamentAndReload() {
+  const tid = getTournamentId();
+  localStorage.setItem("ctx_tournament_id", tid);
+  renderTournamentMeta();
   load();
-}
-
-function restoreContext() {
-  const day = localStorage.getItem("ctx_day") || "Day1";
-  const area = localStorage.getItem("ctx_area") || "A";
-  document.getElementById("daySel").value = day;
-  document.getElementById("areaSel").value = area;
 }
 
 /* ---- MASA SAYISI (localStorage) ---- */
@@ -791,8 +830,8 @@ function buildSlotsForDelete(slots) {
 }
 
 async function load() {
-  const {day, area} = getContext();
-  const res = await fetch('/api/state?day=' + encodeURIComponent(day) + '&area=' + encodeURIComponent(area));
+  const tid = getTournamentId();
+  const res = await fetch('/api/state?tournament_id=' + encodeURIComponent(tid));
   const data = await res.json();
   lastState = data;
 
@@ -826,9 +865,9 @@ async function load() {
     grid.innerHTML += row;
   });
 
-  // admin hücre tıklama: istersen sonra ekleriz; şimdilik silme modalı var zaten
   applyTeamFilter();
   toggleAdminUI();
+  renderTournamentMeta();
 }
 
 function showMsg(ok, text) {
@@ -841,16 +880,16 @@ async function reserve() {
   const team = parseInt(document.getElementById("team").value);
   const range = document.getElementById("range").value;
   const table = document.getElementById("table").value;
-  const {day, area} = getContext();
+  const tournament_id = getTournamentId();
 
-  const admin_token = getAdminToken(); // admin ise backend kuralları kaldırıyor
+  const admin_token = getAdminToken();
 
   const res = await fetch('/api/reserve', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
+      tournament_id,
       team, range, table, table_count: tableCount,
-      day, area,
       admin_token: admin_token
     })
   });
@@ -861,36 +900,36 @@ async function reserve() {
   load();
 }
 
-async function resetTable() {
+async function resetTournament() {
   let token = getAdminToken();
   if (!token) token = prompt("Admin şifresi:");
   if (!token) return;
 
-  const {day, area} = getContext();
+  const tournament_id = getTournamentId();
 
   const res = await fetch('/api/reset', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ token, day, area })
+    body: JSON.stringify({ token, tournament_id })
   });
 
   const data = await res.json();
   if (!data.ok) alert("❌ Şifre yanlış / yetkisiz!");
-  else { alert("✅ Alan sıfırlandı!"); load(); }
+  else { alert("✅ Turnuva sıfırlandı!"); load(); }
 }
 
 function exportCsv() {
-  const {day, area} = getContext();
-  window.location.href = "/api/export.csv?day=" + encodeURIComponent(day) + "&area=" + encodeURIComponent(area);
+  const tournament_id = getTournamentId();
+  window.location.href = "/api/export.csv?tournament_id=" + encodeURIComponent(tournament_id);
 }
 
-/* ---- SİLME (AYNISI) ---- */
+/* ---- SİLME (aynısı) ---- */
 async function deleteReservation() {
   let token = getAdminToken();
   if (!token) token = prompt("Admin şifresi:");
   if (!token) return;
 
-  const {day, area} = getContext();
+  const tournament_id = getTournamentId();
 
   const delTeam = document.getElementById("delTeam").value;
   const delTable = document.getElementById("delTable").value;
@@ -901,7 +940,7 @@ async function deleteReservation() {
     const res = await fetch('/api/delete', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ token, day, area, team })
+      body: JSON.stringify({ token, tournament_id, team })
     });
     const data = await res.json();
     if (!data.ok) alert("❌ " + data.error);
@@ -925,7 +964,7 @@ async function deleteReservation() {
   const res = await fetch('/api/delete', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ token, day, area, table: delTable, slot_index })
+    body: JSON.stringify({ token, tournament_id, table: delTable, slot_index })
   });
   const data = await res.json();
   if (!data.ok) alert("❌ " + data.error);
@@ -934,12 +973,12 @@ async function deleteReservation() {
 }
 
 /* ---- INIT ---- */
-restoreContext();
+buildTournamentSelect();
+restoreTournament();
 
 const savedMasa = getSavedMasa();
 buildTables(savedMasa || tableCount);
 
-// ilk açılışta masa sor
 if (!savedMasa) {
   openMasaModal();
 }
@@ -979,14 +1018,11 @@ def home():
 # ---- API ----
 @app.get("/api/state")
 def state():
-    day = request.args.get("day", "Day1")
-    area = request.args.get("area", "A")
-    day, area = norm_day_area(day, area)
+    tournament_id = norm_tournament_id(request.args.get("tournament_id", DEFAULT_TOURNAMENT_ID))
     return jsonify({
         "slots": slots,
-        "reservations": get_reservations(day, area),
-        "day": day,
-        "area": area
+        "reservations": get_reservations(tournament_id),
+        "tournament_id": tournament_id
     })
 
 
@@ -994,9 +1030,7 @@ def state():
 def reserve():
     data = request.json or {}
 
-    day = data.get("day", "Day1")
-    area = data.get("area", "A")
-    day, area = norm_day_area(day, area)
+    tournament_id = norm_tournament_id(data.get("tournament_id", DEFAULT_TOURNAMENT_ID))
 
     team = data.get("team")
     pref_range = parse_range(data.get("range"))
@@ -1016,7 +1050,7 @@ def reserve():
     except Exception:
         return jsonify({"ok": False, "error": "Masa sayısı geçersiz"})
 
-    res = get_reservations(day, area)
+    res = get_reservations(tournament_id)
 
     t, s, idx = find_slot(
         res,
@@ -1032,7 +1066,7 @@ def reserve():
         return jsonify({"ok": False, "error": "Uygun slot bulunamadı"})
 
     try:
-        insert_reservation(day, area, team, t, idx)
+        insert_reservation(tournament_id, team, t, idx)
     except Exception:
         return jsonify({"ok": False, "error": "Slot dolu / az önce alındı, tekrar dene"})
 
@@ -1047,11 +1081,8 @@ def reset():
     if token != ADMIN_TOKEN:
         return jsonify({"ok": False, "error": "Yetkisiz"}), 401
 
-    day = data.get("day", "Day1")
-    area = data.get("area", "A")
-    day, area = norm_day_area(day, area)
-
-    reset_area(day, area)
+    tournament_id = norm_tournament_id(data.get("tournament_id", DEFAULT_TOURNAMENT_ID))
+    reset_tournament(tournament_id)
     return jsonify({"ok": True})
 
 
@@ -1063,21 +1094,19 @@ def delete():
     if token != ADMIN_TOKEN:
         return jsonify({"ok": False, "error": "Yetkisiz"}), 401
 
-    day = data.get("day", "Day1")
-    area = data.get("area", "A")
-    day, area = norm_day_area(day, area)
+    tournament_id = norm_tournament_id(data.get("tournament_id", DEFAULT_TOURNAMENT_ID))
 
     team = data.get("team", None)
     table = data.get("table", None)
     slot_index = data.get("slot_index", None)
 
     if isinstance(team, int):
-        deleted = delete_by_team(day, area, team)
+        deleted = delete_by_team(tournament_id, team)
         return jsonify({"ok": True, "message": f"Takım {team} için {deleted} rezervasyon silindi."})
 
-    if isinstance(table, str) and (isinstance(slot_index, int) or (isinstance(slot_index, str) and slot_index.isdigit())):
+    if isinstance(table, str) and (isinstance(slot_index, int) or (isinstance(slot_index, str) and str(slot_index).isdigit())):
         slot_index = int(slot_index)
-        deleted = delete_by_table_slot(day, area, table, slot_index)
+        deleted = delete_by_table_slot(tournament_id, table, slot_index)
         if deleted == 0:
             return jsonify({"ok": False, "error": "Bu masa+saat için rezervasyon bulunamadı."})
         return jsonify({"ok": True, "message": "Rezervasyon silindi."})
@@ -1087,25 +1116,22 @@ def delete():
 
 @app.get("/api/export.csv")
 def export_csv():
-    day = request.args.get("day", "Day1")
-    area = request.args.get("area", "A")
-    day, area = norm_day_area(day, area)
-
-    res = get_reservations(day, area)
+    tournament_id = norm_tournament_id(request.args.get("tournament_id", DEFAULT_TOURNAMENT_ID))
+    res = get_reservations(tournament_id)
 
     output = io.StringIO()
     w = csv.writer(output)
-    w.writerow(["day", "area", "team", "table", "time", "slot_index"])
+    w.writerow(["tournament_id", "team", "table", "time", "slot_index"])
     for r in res:
         s = slots[r["slot_index"]]
-        w.writerow([day, area, r["team"], r["table"], f"{s[0]}-{s[1]}", r["slot_index"]])
+        w.writerow([tournament_id, r["team"], r["table"], f"{s[0]}-{s[1]}", r["slot_index"]])
 
     csv_text = output.getvalue()
     output.close()
     return Response(
         csv_text,
         mimetype="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="reservations_{day}_{area}.csv"'}
+        headers={"Content-Disposition": f'attachment; filename="reservations_{tournament_id}.csv"'}
     )
 
 
