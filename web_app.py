@@ -456,7 +456,7 @@ hr { border:none; border-top:1px solid #ddd; margin: 14px 0; }
 
   <div class="searchBox">
     <label>Takım Ara:
-      <input id="teamSearch" placeholder="örn: 3641" oninput="applyTeamFilter()" />
+      <input id="teamSearch" placeholder="örn: 364" oninput="applyTeamFilter()" />
     </label>
     <label style="user-select:none;">
       <input id="onlyThisTeam" type="checkbox" onchange="applyTeamFilter()" />
