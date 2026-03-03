@@ -20,7 +20,7 @@ STEP_MIN = 10
 TABLE_COUNT_DEFAULT = int(os.getenv("TABLE_COUNT", "5"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "secret")
 
-# Saat dilimi (Render’da ENV’e de koymak iyi: TZ=Europe/Istanbul)
+# Saat dilimi (Render'da ENV: TZ=Europe/Istanbul önerilir)
 APP_TZ = os.getenv("TZ", "Europe/Istanbul")
 
 # ---- MOD SEÇİMİ (DB varsa DB, yoksa RAM) ----
@@ -72,7 +72,6 @@ def now_local_minutes() -> int:
 
 # ---- DB ----
 def db_conn():
-    # Sadece DB modunda çağrılır
     return psycopg.connect(DATABASE_URL)
 
 
@@ -94,7 +93,6 @@ def init_db():
         conn.commit()
 
 
-# DB modunda ilk requestte init
 @app.before_request
 def startup():
     if USE_DB and not hasattr(app, "_db_inited"):
@@ -134,15 +132,15 @@ def free(res, table, idx):
     return all(not (r["table"] == table and r["slot_index"] == idx) for r in res)
 
 
-def find_slot(res, team, pref_range, pref_table, table_count: int):
+def find_slot(res, team, pref_range, pref_table, table_count: int, allow_past: bool = False, bypass_spacing: bool = False):
     tables = [str(i) for i in range(1, table_count + 1)]
 
-    # ✅ geçmiş slotları vermemek için
-    earliest_m = ceil_to_step(now_local_minutes(), STEP_MIN)
+    earliest_m = None
+    if not allow_past:
+        earliest_m = ceil_to_step(now_local_minutes(), STEP_MIN)
 
     for i, s in enumerate(slots):
-        # geçmiş slotu atla
-        if minutes_from_hhmm(s[0]) < earliest_m:
+        if earliest_m is not None and minutes_from_hhmm(s[0]) < earliest_m:
             continue
 
         st = to_dt(s[0])
@@ -154,8 +152,11 @@ def find_slot(res, team, pref_range, pref_table, table_count: int):
 
         table_list = [pref_table] if (pref_table and pref_table != "Auto") else tables
         for t in table_list:
-            if free(res, t, i) and team_ok(res, team, i):
-                return t, s, i
+            if not free(res, t, i):
+                continue
+            if (not bypass_spacing) and (not team_ok(res, team, i)):
+                continue
+            return t, s, i
 
     return None, None, None
 
@@ -194,7 +195,6 @@ def reset_all():
                 cur.execute("TRUNCATE TABLE reservations;")
             conn.commit()
         return
-
     _reservations_mem = []
     _next_id = 1
 
@@ -251,7 +251,7 @@ button {{ padding: 8px 12px; border: 0; border-radius: 6px; cursor: pointer; }}
 #deleteBtn {{ background: #555; color: white; }}
 #modal {{ position: fixed; top:0; left:0; width:100%; height:100%;
   background:rgba(0,0,0,0.6); display:none; align-items:center; justify-content:center; z-index: 9999; }}
-#modalBox {{ position: relative; background:white; padding:20px; border-radius:10px; width: min(520px, 92vw); }}
+#modalBox {{ position: relative; background:white; padding:20px; border-radius:10px; width: min(640px, 92vw); }}
 #msg {{ margin: 8px 0 14px 0; font-weight: 600; }}
 .small {{ font-size: 12px; opacity: 0.85; }}
 hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
@@ -299,11 +299,26 @@ hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
 }}
 .hl {{ outline: 3px solid #000; }}
 .dim {{ opacity: 0.18; }}
+
+/* ✅ admin badge */
+#adminBadge {{
+  display:none;
+  position: fixed;
+  top: 62px;
+  right: 16px;
+  background: #111;
+  color: #fff;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  z-index: 10000;
+}}
 </style>
 </head>
 <body>
 
 <div id="clock"></div>
+<div id="adminBadge">ADMIN ✅</div>
 
 <div class="badge">{badge}</div>
 
@@ -369,6 +384,22 @@ hr {{ border:none; border-top:1px solid #ddd; margin: 14px 0; }}
       Sadece bu takımı göster
     </label>
   </div>
+
+  <label style="user-select:none;">
+    <input id="adminMode" type="checkbox" onchange="toggleAdminUI()" />
+    Admin Mod
+  </label>
+
+  <button onclick="adminLogin()">Admin Giriş</button>
+
+  <label id="slotPickWrap" style="display:none;">Saat:
+    <select id="slotPick"></select>
+  </label>
+
+  <label id="overwriteWrap" style="display:none; user-select:none;">
+    <input id="overwrite" type="checkbox" checked />
+    Doluysa üstüne yaz
+  </label>
 </div>
 
 <p id="msg"></p>
@@ -391,7 +422,6 @@ function startClock() {{
   tick();
   setInterval(tick, 250);
 }}
-
 startClock();
 
 function closeModal() {{
@@ -476,11 +506,53 @@ function applyTeamFilter() {{
   }});
 }}
 
+// ---- ADMIN MODE (15dk session) ----
+function getAdminToken() {{
+  const raw = sessionStorage.getItem("admin_token") || "";
+  const exp = parseInt(sessionStorage.getItem("admin_token_exp") || "0", 10);
+  if (!raw) return "";
+  if (Date.now() > exp) {{
+    sessionStorage.removeItem("admin_token");
+    sessionStorage.removeItem("admin_token_exp");
+    return "";
+  }}
+  return raw;
+}}
+
+function adminLogin() {{
+  const t = prompt("Admin şifresi:");
+  if (!t) return;
+  sessionStorage.setItem("admin_token", t);
+  sessionStorage.setItem("admin_token_exp", String(Date.now() + 15 * 60 * 1000));
+  alert("✅ Admin giriş OK (15 dk)");
+  // checkbox açık ise badge göster
+  toggleAdminUI();
+}}
+
+function toggleAdminUI() {{
+  const on = document.getElementById("adminMode").checked;
+  document.getElementById("slotPickWrap").style.display = on ? "inline-block" : "none";
+  document.getElementById("overwriteWrap").style.display = on ? "inline-block" : "none";
+
+  const badge = document.getElementById("adminBadge");
+  const hasToken = !!getAdminToken();
+  badge.style.display = (on && hasToken) ? "block" : "none";
+}}
+
 async function load() {{
   const res = await fetch('/api/state');
   const data = await res.json();
 
   buildSlotsForDelete(data.slots);
+
+  // admin slot picker doldur
+  const sp = document.getElementById("slotPick");
+  if (sp) {{
+    sp.innerHTML = "";
+    data.slots.forEach((s, i) => {{
+      sp.innerHTML += "<option value='"+i+"'>"+s[0]+"-"+s[1]+"</option>";
+    }});
+  }}
 
   const grid = document.getElementById("grid");
   grid.innerHTML = "";
@@ -511,6 +583,7 @@ async function load() {{
   }});
 
   applyTeamFilter();
+  toggleAdminUI();
 }}
 
 async function reserve() {{
@@ -518,10 +591,18 @@ async function reserve() {{
   const range = document.getElementById("range").value;
   const table = document.getElementById("table").value;
 
+  const adminMode = document.getElementById("adminMode").checked;
+  const admin_token = adminMode ? getAdminToken() : "";
+  const slot_index = adminMode ? parseInt(document.getElementById("slotPick").value, 10) : null;
+  const overwrite = adminMode ? document.getElementById("overwrite").checked : false;
+
   const res = await fetch('/api/reserve', {{
     method: 'POST',
     headers: {{'Content-Type':'application/json'}},
-    body: JSON.stringify({{ team, range, table, table_count: tableCount }})
+    body: JSON.stringify({{
+      team, range, table, table_count: tableCount,
+      admin_token, slot_index, overwrite
+    }})
   }});
 
   const data = await res.json();
@@ -606,15 +687,13 @@ async function deleteReservation() {{
 buildTables(tableCount);
 initTables();
 
-/* ✅ Modal dışına tıklayınca kapansın */
 window.addEventListener("click", (e) => {{
   const modal = document.getElementById("modal");
   if (e.target === modal) closeModal();
 }});
 
-/* ✅ Auto-refresh: 10 saniyede bir */
+// ✅ Auto-refresh: 10 saniyede bir (modal açıkken bekler)
 setInterval(() => {{
-  // modal açıkken rahatsız etmesin
   const modal = document.getElementById("modal");
   const isOpen = modal && modal.style.display === "flex";
   if (!isOpen) load();
@@ -644,6 +723,12 @@ def reserve():
     pref_table = data.get("table", "Auto")
     table_count = data.get("table_count", TABLE_COUNT_DEFAULT)
 
+    # ✅ admin override
+    admin_token = data.get("admin_token", "")
+    is_admin = (admin_token == ADMIN_TOKEN)
+    exact_slot_index = data.get("slot_index", None)
+    overwrite = bool(data.get("overwrite", False))
+
     if not isinstance(team, int):
         return jsonify({"ok": False, "error": "Takım numarası sayı olmalı"})
 
@@ -655,7 +740,37 @@ def reserve():
         return jsonify({"ok": False, "error": "Masa sayısı geçersiz"})
 
     res = get_reservations()
-    t, s, idx = find_slot(res, team, pref_range, pref_table, table_count)
+
+    # ✅ ADMIN: istediğin masa + istediğin slot_index (kurallar yok)
+    if is_admin and exact_slot_index is not None:
+        try:
+            exact_slot_index = int(exact_slot_index)
+        except Exception:
+            return jsonify({"ok": False, "error": "slot_index geçersiz"})
+
+        if exact_slot_index < 0 or exact_slot_index >= len(slots):
+            return jsonify({"ok": False, "error": "slot_index aralık dışı"})
+
+        if not isinstance(pref_table, str) or pref_table in ("", "Auto"):
+            return jsonify({"ok": False, "error": "Admin modda masa seçmelisin"})
+
+        if overwrite:
+            delete_by_table_slot(pref_table, exact_slot_index)
+
+        try:
+            insert_reservation(team, pref_table, exact_slot_index)
+        except Exception:
+            return jsonify({"ok": False, "error": "Bu slot dolu (overwrite aç)"})
+
+        s = slots[exact_slot_index]
+        return jsonify({"ok": True, "result": {"team": team, "table": pref_table, "slot": s}})
+
+    # Normal kullanıcı akışı (admin değilse kurallar var, admin ise kurallar kalkar)
+    t, s, idx = find_slot(
+        res, team, pref_range, pref_table, table_count,
+        allow_past=is_admin,
+        bypass_spacing=is_admin
+    )
 
     if not t:
         return jsonify({"ok": False, "error": "Uygun slot bulunamadı"})
